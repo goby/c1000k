@@ -18,6 +18,7 @@
 #include <fcntl.h>
 #include <sys/epoll.h>
 #include <sys/resource.h>
+#include <sys/shm.h>
 
 static char * MESSAGE = "GET / HTTP/1.1 \r\nUser-Agent: AsyncBenchmark 0.1\r\nHost: 1\r\n\r\n";
 
@@ -112,9 +113,18 @@ int main(int argc, char **argv){
     char buffer[10240];
     int i;
     pid_t pid;
-    long request_count = 0;
+    long *request_count;
+    int segmentId;
   
     clients = count_of_cpu();
+
+    int shareSize = sizeof(long) * (clients + 2);
+    segmentId = shmget(IPC_PRIVATE, shareSize, S_IRUSR | S_IWUSR);
+    if (segmentId == -1 ) {
+        perror("shmget EROOR");
+        return (-1);
+    }
+    
     for (i = 0; i < clients; i++) {
         pid = fork();
         if(pid <= (pid_t)0) {
@@ -129,17 +139,27 @@ int main(int argc, char **argv){
         return 3;
     }
 
+    request_count = (long *)shmat(segmentId, NULL, 0);
+
     if (pid != 0) {
         long pre_count = 0; 
+        long cur_count = 0; 
         while(1) {
-            long qps = request_count - pre_count;
-            pre_count = request_count;
+            for (i = 0; i < clients; i++) {
+                cur_count += *(request_count+i);
+            }
+            long qps = cur_count - pre_count;
+            pre_count = cur_count;
+            cur_count = 0;
             fprintf(stdout, "[INFO] QPS: %ld\n", qps);
             sleep(1);
         }
         return 0;
     }
 
+    /* Initialize request count for each worker. */
+    request_count = request_count + i;
+    *request_count = 0;
     max_open_files(655350);
 
     efd = epoll_create1(0);
@@ -232,7 +252,7 @@ int main(int argc, char **argv){
                         break; 
                     } 
                     n += nrecv;
-                    request_count++;
+                    (*request_count)++;
                 } 
             }
             else if ((events[i].events & EPOLLERR) ||
